@@ -1367,13 +1367,32 @@ fn run() -> Result<()> {
                 "keys": keys,
             });
             let v = client.post("/iyke/terminal/send", body)?;
-            let summary = match (&data, keys.is_empty()) {
-                (Some(d), false) => {
-                    format!("terminal-send text({}b) + {} key(s)", d.len(), keys.len())
-                }
-                (Some(d), true) => format!("terminal-send text({}b)", d.len()),
-                (None, false) => format!("terminal-send {} key(s)", keys.len()),
-                (None, true) => "terminal-send".into(),
+            // If the server returns ok:false (pane had no writable terminal),
+            // treat it as a hard error so the caller gets a non-zero exit and
+            // the silent-success bug from issue #78 is surfaced immediately.
+            if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+                let msg = v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("pane has no writable terminal");
+                return Err(anyhow!("terminal-send: {msg}"));
+            }
+            // Build human-readable summary. Include resolved terminal/pty ids
+            // and delivered byte count when the server returns them (it does for
+            // direct-target writes that go through controlled_write).
+            let delivered_bytes = v.get("byte_count").and_then(|b| b.as_u64())
+                .or_else(|| data.as_ref().map(|d| d.len() as u64));
+            let terminal_tag = v.get("terminal_id")
+                .and_then(|t| t.as_str())
+                .map(|id| format!(" [terminal {}]", &id[..id.len().min(8)]))
+                .unwrap_or_default();
+            let bytes_tag = delivered_bytes
+                .map(|b| format!(" {}b", b))
+                .unwrap_or_default();
+            let summary = match (!keys.is_empty(), delivered_bytes.is_some() || data.is_some()) {
+                (true, true) => format!("terminal-send{terminal_tag}{bytes_tag} + {} key(s)", keys.len()),
+                (true, false) => format!("terminal-send{terminal_tag} {} key(s)", keys.len()),
+                (false, _) => format!("terminal-send{terminal_tag}{bytes_tag}"),
             };
             print_write_result(&summary, &v, fmt);
         }
