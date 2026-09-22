@@ -10,6 +10,7 @@
 //! tabs, split/focus/close panes.
 
 mod api;
+mod cmd;
 mod control;
 mod output;
 
@@ -57,9 +58,13 @@ enum Command {
     },
 
     /// Switch the sidebar activity mode.
+    ///
+    /// The v16 rail exposes exactly four modes — `project`, `chi`, `ngwa`,
+    /// `settings`. The bridge still accepts the legacy names (`app`,
+    /// `files`, `sessions`, `pkgs`, …) for one compatibility release and
+    /// normalizes them shell-side; new automation should use the v16 set.
     Mode {
-        /// One of: app, files, agents, sessions, settings,
-        /// video-engine, canvas-design, image-generator.
+        /// One of: project, chi, ngwa, settings.
         mode: String,
     },
 
@@ -461,6 +466,21 @@ enum Command {
     Chi {
         #[command(subcommand)]
         action: ChiAction,
+    },
+
+    /// The Project noun (WP-21b): show and switch the shell's active
+    /// project, and list the Explorer sidebar's registered sections.
+    Project {
+        #[command(subcommand)]
+        action: cmd::project::ProjectAction,
+    },
+
+    /// The Ngwa noun (WP-21b): the unified equipment catalogue — installed
+    /// pkgs + Ọba-placed primitives + engine config — that the `/ngwa/*`
+    /// surfaces render. Reads the bridged `ngwa_snapshot` payload.
+    Ngwa {
+        #[command(subcommand)]
+        action: cmd::ngwa::NgwaAction,
     },
 }
 
@@ -1613,6 +1633,8 @@ fn run() -> Result<()> {
         Command::Browser { pkg_id, action } => {
             run_browser(&client, &pkg_id, action, fmt)?;
         }
+        Command::Project { action } => cmd::project::run(&client, action, fmt)?,
+        Command::Ngwa { action } => cmd::ngwa::run(&client, action, fmt)?,
         Command::Chi { action } => {
             run_chi(&client, action, fmt)?;
         }
@@ -2953,5 +2975,74 @@ mod tests {
                 action: ChiAction::Attach { ref run_id },
             } if run_id == "run-abc"
         ));
+    }
+
+    #[test]
+    fn parses_project_noun() {
+        use crate::cmd::project::ProjectAction;
+
+        let show = Cli::try_parse_from(["iyke", "project", "show"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Command::Project {
+                action: ProjectAction::Show
+            }
+        ));
+
+        let sections = Cli::try_parse_from(["iyke", "project", "sections"]).unwrap();
+        assert!(matches!(
+            sections.command,
+            Command::Project {
+                action: ProjectAction::Sections
+            }
+        ));
+
+        let switch = Cli::try_parse_from(["iyke", "project", "switch", "C:/repo"]).unwrap();
+        match switch.command {
+            Command::Project {
+                action: ProjectAction::Switch { path },
+            } => assert_eq!(path, "C:/repo"),
+            _ => panic!("expected project switch"),
+        }
+    }
+
+    #[test]
+    fn parses_ngwa_noun() {
+        use crate::cmd::ngwa::NgwaAction;
+
+        for (argv, want) in [
+            (vec!["iyke", "ngwa", "installed"], "installed"),
+            (vec!["iyke", "ngwa", "store"], "store"),
+            (vec!["iyke", "ngwa", "scopes"], "scopes"),
+            (vec!["iyke", "ngwa", "health"], "health"),
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let ok = match (cli.command, want) {
+                (
+                    Command::Ngwa {
+                        action: NgwaAction::Installed,
+                    },
+                    "installed",
+                ) => true,
+                (Command::Ngwa { action: NgwaAction::Store }, "store") => true,
+                (Command::Ngwa { action: NgwaAction::Scopes }, "scopes") => true,
+                (
+                    Command::Ngwa {
+                        action: NgwaAction::Health,
+                    },
+                    "health",
+                ) => true,
+                _ => false,
+            };
+            assert!(ok, "parse failed for {want}");
+        }
+
+        let item = Cli::try_parse_from(["iyke", "ngwa", "item", "com.ikenga.iyke"]).unwrap();
+        match item.command {
+            Command::Ngwa {
+                action: NgwaAction::Item { id },
+            } => assert_eq!(id, "com.ikenga.iyke"),
+            _ => panic!("expected ngwa item"),
+        }
     }
 }
