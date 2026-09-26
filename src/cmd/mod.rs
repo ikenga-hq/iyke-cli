@@ -6,6 +6,9 @@
 
 use anyhow::{anyhow, Error};
 
+pub mod actions;
+pub mod keys;
+pub mod menus;
 pub mod ngwa;
 pub mod project;
 
