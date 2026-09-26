@@ -28,3 +28,27 @@ pub fn missing_route(path: &str, what: &str, e: Error) -> Error {
         e
     }
 }
+
+/// WP-62 review (C4): for a route whose own legitimate 404 (an unknown menu
+/// id, `/iyke/menus/:id`) is indistinguishable by status code alone from
+/// "an older shell doesn't have this route at all", [`missing_route`]'s
+/// blanket "was this a 404" rewrite would misdiagnose the first as the
+/// second. Checking the shell's self-reported `shell.bridge_api`
+/// (`GET /iyke/state`, `src-tauri/src/iyke/handlers.rs`'s `BRIDGE_API` doc
+/// comment) up front tells the two apart before the request that might 404
+/// even runs.
+pub fn require_bridge_api(client: &crate::api::Client, min: u32, what: &str) -> Result<(), Error> {
+    let state = client.get_state()?;
+    let level = state
+        .get("shell")
+        .and_then(|s| s.get("bridge_api"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if level < u64::from(min) {
+        return Err(anyhow!(
+            "{what} needs a newer Ikenga shell (bridge_api >= {min}; this shell reports {level}). \
+             Update the Ikenga desktop app."
+        ));
+    }
+    Ok(())
+}
