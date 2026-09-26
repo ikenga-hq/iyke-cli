@@ -482,6 +482,27 @@ enum Command {
         #[command(subcommand)]
         action: cmd::ngwa::NgwaAction,
     },
+
+    /// The Actions noun (WP-62): list, upsert and import user actions
+    /// (G-ACTIONS). Writes round-trip through the running shell into the
+    /// same `saveUserAction` the D-06 Editor tab calls.
+    Actions {
+        #[command(subcommand)]
+        action: cmd::actions::ActionsAction,
+    },
+
+    /// The Menus noun (WP-62): show one effective menu (G-ACTIONS §1.3).
+    Menus {
+        #[command(subcommand)]
+        action: cmd::menus::MenusAction,
+    },
+
+    /// The Keys noun (WP-62): list and add keybindings, and query "what
+    /// fires here" for a key sequence.
+    Keys {
+        #[command(subcommand)]
+        action: cmd::keys::KeysAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1635,6 +1656,9 @@ fn run() -> Result<()> {
         }
         Command::Project { action } => cmd::project::run(&client, action, fmt)?,
         Command::Ngwa { action } => cmd::ngwa::run(&client, action, fmt)?,
+        Command::Actions { action } => cmd::actions::run(&client, action, fmt)?,
+        Command::Menus { action } => cmd::menus::run(&client, action, fmt)?,
+        Command::Keys { action } => cmd::keys::run(&client, action, fmt)?,
         Command::Chi { action } => {
             run_chi(&client, action, fmt)?;
         }

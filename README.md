@@ -94,6 +94,82 @@ iyke task complete "$TASK_ID" --task-result "merged in #74"
 Add `--json` to any command for machine-readable output. If the desktop app is not running,
 every command exits non-zero with a clear message instead of hanging.
 
+## Actions, menus and keys
+
+The Actions noun (WP-62) reads and writes the same `actions.json` / `keybindings.json` layer
+the D-06 Actions/Menus/Keys settings tabs do (G-ACTIONS,
+`plans/shell-ux-rearchitecture/drafts/actions-schema.md` in the workspace meta-repo). Every
+write round-trips into the running shell's frontend and through its validator — a CLI-authored
+action or key can't skip a check the UI would apply.
+
+```bash
+# List the effective actions the shell currently merges.
+iyke actions list
+iyke actions list --scope personal
+
+# Upsert one user action by id. --doc - reads the document from stdin.
+iyke actions set explain-file --scope personal --file explain-file.json
+echo '{"name":"Explain this file","run":{"kind":"skill","skill":"explain"}}' \
+  | iyke actions set explain-file --scope personal --doc -
+
+# Import a batch from a teammate's actions.json. An id already present in
+# the target scope's file is skipped unless --overwrite is given. Exits
+# non-zero if the write is refused or any item errored.
+iyke actions import --from team --file teammate-actions.json --scope project
+iyke actions import --from team --file teammate-actions.json --overwrite
+
+# Show one effective menu (frozen menu ids, G-ACTIONS §1.3).
+iyke menus show files
+iyke menus show section/automations
+iyke menus show native/file
+
+# List the effective keymap, add a binding, and ask "what fires here".
+iyke keys list --search explain
+iyke keys set --scope personal --command explain-file --key mod+shift+e
+iyke keys resolve mod+k
+```
+
+`--from pkg` and `--from vscode` are not implemented yet — they land with the Import tab
+(WP-61); `actions import --from pkg|vscode` prints a clear message and exits non-zero.
+
+### Brief a Chi to make an action
+
+An `actions.json` entry is `{id, name, icon?, description?, run, placements?, scope}`. `id` is
+`^[a-z0-9][a-z0-9-]{0,63}$` (no `.`, no `:`, unique in the file, never a built-in id); `name` is
+1–80 characters; `scope` must equal the file it's written to (`personal` or `project`). Below is
+a minimal valid entry per `run.kind` — hand one of these to a Chi as the shape to fill in:
+
+```jsonc
+// chi — dispatch a prompt to a session
+{ "id": "explain-file", "name": "Explain this file", "scope": "personal",
+  "run": { "kind": "chi", "target": "active", "prompt": "Explain {{file.path}}" } }
+
+// shell — run a command (personal only, or project + trusted, G-ACTIONS §8.3)
+{ "id": "refresh-pulse", "name": "Refresh pulse snapshots", "scope": "project",
+  "run": { "kind": "shell", "command": "scripts/pulse/build-all.sh" } }
+
+// iyke — call a bridge route
+{ "id": "reveal-in-files", "name": "Reveal in Files", "scope": "personal",
+  "run": { "kind": "iyke", "route": "/pane/navigate", "method": "POST" } }
+
+// skill — invoke an installed skill
+{ "id": "run-release-status", "name": "Release status", "scope": "personal",
+  "run": { "kind": "skill", "skill": "release-status" } }
+
+// workflow — disabled until a workflow runner exists (accepted, never runs)
+{ "id": "nightly-audit", "name": "Nightly audit", "scope": "personal",
+  "run": { "kind": "workflow", "workflow": "nightly-audit" } }
+
+// open — a shell route, a pkg:// pane, or an external URL
+{ "id": "open-docs", "name": "Open docs", "scope": "personal",
+  "run": { "kind": "open", "url": "https://ikenga.dev/docs" } }
+```
+
+`placements` (default `[]`) is a list of `{ "at": "<menuId>", "when"?: "<expr>" }` — omit it for
+an action reachable only by key or `iyke actions set`. The six `{{name}}` run variables
+(`file.path`, `file.name`, `selection`, `project.root`, `pane.url`, `branch`) interpolate as
+`""` when there's no matching context.
+
 ## Testing
 
 `cargo test` covers argument parsing only — it proves clap accepts the flags,

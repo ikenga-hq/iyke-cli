@@ -92,8 +92,22 @@ fn normalize_response(resp: Result<ureq::Response, ureq::Error>, path: &str) -> 
             let body = r.into_string().unwrap_or_default();
             Err(anyhow!("{path} returned HTTP {code}: {body}"))
         }
-        Err(ureq::Error::Transport(t)) => Err(anyhow!(
-            "could not reach iyke server at {path}: {t}. Is the PA desktop app running?"
-        )),
+        Err(ureq::Error::Transport(t)) => {
+            // WP-62 review (C5): a request timeout (a live FE round trip like
+            // `/iyke/keys/resolve` outrunning its deadline) means the app *is*
+            // running, just slow to answer — a different diagnosis than
+            // "not running at all", so don't collapse both into one message.
+            if t.to_string().to_lowercase().contains("timed out") {
+                Err(anyhow!(
+                    "{path} timed out waiting for a response. The PA desktop app is running, but \
+                     its webview hasn't answered yet (unfocused window, heavy load, or a wedged \
+                     renderer) — retry, or check the app isn't frozen. Underlying error: {t}"
+                ))
+            } else {
+                Err(anyhow!(
+                    "could not reach iyke server at {path}: {t}. Is the PA desktop app running?"
+                ))
+            }
+        }
     }
 }
