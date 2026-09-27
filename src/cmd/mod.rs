@@ -11,6 +11,7 @@ pub mod keys;
 pub mod menus;
 pub mod ngwa;
 pub mod project;
+pub mod seat;
 
 /// Rewrite a bare HTTP 404 on a route the running shell doesn't expose yet
 /// into an actionable error naming the missing route and its owning work
