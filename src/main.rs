@@ -254,14 +254,46 @@ enum Command {
     /// `Ctrl+C` → `\x03`, `Up`/`Down`/`Left`/`Right` → CSI arrows, `F1`-`F12`
     /// → SS3/CSI), or both (text first, then keys in order).
     ///
+    /// `--seat <seat>` is its own addressing mode (not an alias of
+    /// `--label`): the text goes to whatever the seat's session is — typed
+    /// into its terminal with Enter, queued behind a busy run, sent to an
+    /// idle run — and a vacant seat resumes its last session first (or
+    /// starts a fresh one, and says so). Needs a shell with bridge API 5.
+    ///
     /// Examples:
     ///   iyke terminal-send "cd ikenga" --key Enter
     ///   iyke terminal-send --pane <leafId> --key Ctrl+C
     ///   iyke terminal-send "echo hi" --key Enter --key Up
+    ///   iyke terminal-send --seat lead "review the diff"
+    ///   iyke terminal-send --seat royalti-co/docs "update the README" --as orch --hold
     #[command(name = "terminal-send")]
     TerminalSend {
-        /// Raw text to write (optional if at least one `--key` is given).
+        /// Raw text to write (optional if at least one `--key` is given;
+        /// required with `--seat`).
         text: Option<String>,
+        /// Send to a Chi seat: `<name>`, `@<name>`, `<project>/<name>` or
+        /// `seat:<project>/<name>`. A bare name resolves in the shell's
+        /// active project.
+        #[arg(
+            long,
+            requires = "text",
+            conflicts_with_all = [
+                "keys", "pane", "session", "terminal", "label",
+                "expected_pty_id", "actor", "dry_run", "no_focus",
+            ]
+        )]
+        seat: Option<String>,
+        /// With `--seat`: take over a seat another client holds (explicit
+        /// only — never by timeout).
+        #[arg(long, requires = "seat")]
+        takeover: bool,
+        /// With `--seat`: acquire (or renew) this client's hold on the seat.
+        #[arg(long, requires = "seat")]
+        hold: bool,
+        /// With `--seat`: the client id recorded as the seat's holder.
+        /// Defaults to `iyke`.
+        #[arg(long = "as", value_name = "CLIENT", requires = "seat")]
+        seat_client: Option<String>,
         /// Key combo to append after `text`. Repeatable.
         #[arg(long = "key")]
         keys: Vec<String>,
@@ -502,6 +534,21 @@ enum Command {
     Keys {
         #[command(subcommand)]
         action: cmd::keys::KeysAction,
+    },
+
+    /// Chi seats (WP-70, G-SEATS): named, per-project slots
+    /// (`seat:<project>/<name>`) that each point at one session. List,
+    /// create, resume, fill, clear and release them; send to one with
+    /// `iyke terminal-send --seat <seat> "<text>"`.
+    ///
+    /// `--as <client>` names this caller (default `iyke`); `--hold` holds the
+    /// seat for that client; `--takeover` claims a seat another client
+    /// holds. Needs a shell with bridge API 5.
+    Seat {
+        #[command(flatten)]
+        actor: cmd::seat::SeatActorArgs,
+        #[command(subcommand)]
+        action: cmd::seat::SeatAction,
     },
 }
 
@@ -1372,6 +1419,10 @@ fn run() -> Result<()> {
         }
         Command::TerminalSend {
             text,
+            seat,
+            takeover,
+            hold,
+            seat_client,
             keys,
             pane,
             session,
@@ -1383,6 +1434,21 @@ fn run() -> Result<()> {
             dry_run,
             no_focus,
         } => {
+            // WP-70: `--seat` is its own resolver (`/iyke/seats/send`), not
+            // a PTY address — clap already refused every PTY-addressing flag
+            // alongside it.
+            if let Some(seat) = seat {
+                let text = text
+                    .as_deref()
+                    .map(interpret_backslash_escapes)
+                    .ok_or_else(|| anyhow!("terminal-send --seat: provide the text to send"))?;
+                let seat_actor = cmd::seat::SeatActorArgs {
+                    takeover,
+                    hold,
+                    client: seat_client,
+                };
+                return cmd::seat::send(&client, &seat, &text, lease_token, &seat_actor, fmt);
+            }
             require_at_most_one_target(&pane, &session, &terminal, &label)?;
             if no_focus && terminal.is_none() && label.is_none() && session.is_none() {
                 return Err(anyhow!(
@@ -1659,6 +1725,7 @@ fn run() -> Result<()> {
         Command::Actions { action } => cmd::actions::run(&client, action, fmt)?,
         Command::Menus { action } => cmd::menus::run(&client, action, fmt)?,
         Command::Keys { action } => cmd::keys::run(&client, action, fmt)?,
+        Command::Seat { actor, action } => cmd::seat::run(&client, &actor, action, fmt)?,
         Command::Chi { action } => {
             run_chi(&client, action, fmt)?;
         }
@@ -2542,6 +2609,185 @@ mod tests {
             }
             _ => panic!("expected scratchpad set"),
         }
+    }
+
+    // ── WP-70: Chi seats ────────────────────────────────────────────────
+
+    fn seat_cmd(args: &[&str]) -> (cmd::seat::SeatActorArgs, cmd::seat::SeatAction) {
+        let mut argv = vec!["iyke", "seat"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Seat { actor, action } => (actor, action),
+            _ => panic!("expected seat"),
+        }
+    }
+
+    #[test]
+    fn parses_seat_verbs() {
+        use cmd::seat::SeatAction;
+        assert_eq!(seat_cmd(&["ls"]).1, SeatAction::Ls { project: None });
+        assert_eq!(
+            seat_cmd(&["list", "--project", "royalti-co"]).1,
+            SeatAction::Ls {
+                project: Some("royalti-co".into())
+            }
+        );
+        // The locked create form's three lines.
+        assert_eq!(
+            seat_cmd(&["create", "docs", "--engine", "claude-code"]).1,
+            SeatAction::Create {
+                name: "docs".into(),
+                engine: Some("claude-code".into()),
+                session: None,
+                resume: None,
+                project: None,
+            }
+        );
+        assert_eq!(
+            seat_cmd(&["create", "docs", "--session", "t-1"]).1,
+            SeatAction::Create {
+                name: "docs".into(),
+                engine: None,
+                session: Some("t-1".into()),
+                resume: None,
+                project: None,
+            }
+        );
+        assert_eq!(
+            seat_cmd(&[
+                "create", "docs", "--engine", "claude-code", "--resume", "run-9", "--project",
+                "royalti-co",
+            ])
+            .1,
+            SeatAction::Create {
+                name: "docs".into(),
+                engine: Some("claude-code".into()),
+                session: None,
+                resume: Some("run-9".into()),
+                project: Some("royalti-co".into()),
+            }
+        );
+        assert_eq!(
+            seat_cmd(&["resume", "docs", "--prompt", "continue"]).1,
+            SeatAction::Resume {
+                seat: "docs".into(),
+                session: None,
+                prompt: Some("continue".into()),
+            }
+        );
+        assert_eq!(
+            seat_cmd(&["resume", "@docs", "--session", "run-3"]).1,
+            SeatAction::Resume {
+                seat: "@docs".into(),
+                session: Some("run-3".into()),
+                prompt: None,
+            }
+        );
+        assert_eq!(
+            seat_cmd(&["fill", "seat:royalti-co/docs", "--prompt", "go"]).1,
+            SeatAction::Fill {
+                seat: "seat:royalti-co/docs".into(),
+                prompt: "go".into(),
+            }
+        );
+        assert_eq!(
+            seat_cmd(&["clear", "docs"]).1,
+            SeatAction::Clear { seat: "docs".into() }
+        );
+        assert_eq!(
+            seat_cmd(&["release", "docs"]).1,
+            SeatAction::Release { seat: "docs".into() }
+        );
+    }
+
+    #[test]
+    fn seat_verbs_reject_contradictory_flags() {
+        // --session and --resume are both a move; one at a time.
+        assert!(Cli::try_parse_from([
+            "iyke", "seat", "create", "docs", "--session", "a", "--resume", "b"
+        ])
+        .is_err());
+        // resume: move a session in, or resume with a prompt — not both.
+        assert!(Cli::try_parse_from([
+            "iyke", "seat", "resume", "docs", "--session", "a", "--prompt", "b"
+        ])
+        .is_err());
+        // fill needs --prompt (§7.3).
+        assert!(Cli::try_parse_from(["iyke", "seat", "fill", "docs"]).is_err());
+        // rename / remove are UI-only in Phase 7 (P-9).
+        assert!(Cli::try_parse_from(["iyke", "seat", "rename", "docs", "notes"]).is_err());
+        assert!(Cli::try_parse_from(["iyke", "seat", "remove", "docs"]).is_err());
+    }
+
+    #[test]
+    fn seat_actor_flags_are_global_within_seat() {
+        let (actor, _) = seat_cmd(&["release", "docs", "--as", "orch", "--takeover"]);
+        assert_eq!(actor.client.as_deref(), Some("orch"));
+        assert!(actor.takeover);
+        assert!(!actor.hold);
+        let (actor, _) = seat_cmd(&["--hold", "--as", "orch", "resume", "docs", "--prompt", "x"]);
+        assert!(actor.hold);
+        assert_eq!(actor.client_id(), "orch");
+        let (actor, _) = seat_cmd(&["ls"]);
+        assert_eq!(actor.client_id(), "iyke");
+    }
+
+    #[test]
+    fn terminal_send_seat_is_its_own_addressing_mode() {
+        let cli = Cli::try_parse_from([
+            "iyke",
+            "terminal-send",
+            "--seat",
+            "royalti-co/lead",
+            "review the diff",
+            "--as",
+            "orch",
+            "--hold",
+            "--lease-token",
+            "tok",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::TerminalSend {
+                text,
+                seat,
+                takeover,
+                hold,
+                seat_client,
+                label,
+                lease_token,
+                ..
+            } => {
+                assert_eq!(text.as_deref(), Some("review the diff"));
+                assert_eq!(seat.as_deref(), Some("royalti-co/lead"));
+                assert!(hold && !takeover);
+                assert_eq!(seat_client.as_deref(), Some("orch"));
+                assert!(label.is_none(), "--seat is not an alias of --label");
+                assert_eq!(lease_token.as_deref(), Some("tok"));
+            }
+            _ => panic!("expected terminal-send"),
+        }
+
+        // --seat never combines with a PTY address or raw keys.
+        for extra in [
+            &["--label", "lead"][..],
+            &["--terminal", "t-1"][..],
+            &["--pane", "leaf-1"][..],
+            &["--session", "s-1"][..],
+            &["--key", "Enter"][..],
+            &["--dry-run"][..],
+            &["--actor", "orch"][..],
+        ] {
+            let mut argv = vec!["iyke", "terminal-send", "--seat", "lead", "hi"];
+            argv.extend_from_slice(extra);
+            assert!(Cli::try_parse_from(argv).is_err(), "--seat with {extra:?}");
+        }
+        // --seat needs text; the seat flags need --seat.
+        assert!(Cli::try_parse_from(["iyke", "terminal-send", "--seat", "lead"]).is_err());
+        assert!(Cli::try_parse_from(["iyke", "terminal-send", "hi", "--takeover"]).is_err());
+        assert!(Cli::try_parse_from(["iyke", "terminal-send", "hi", "--as", "orch"]).is_err());
+        // Plain terminal-send is unchanged.
+        assert!(Cli::try_parse_from(["iyke", "terminal-send", "hi", "--label", "lead"]).is_ok());
     }
 
     #[test]

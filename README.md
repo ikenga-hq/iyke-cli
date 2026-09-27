@@ -170,6 +170,59 @@ an action reachable only by key or `iyke actions set`. The six `{{name}}` run va
 (`file.path`, `file.name`, `selection`, `project.root`, `pane.url`, `branch`) interpolate as
 `""` when there's no matching context.
 
+## Chi seats
+
+A **seat** is a named, per-project slot for an agent session — `seat:<project>/<name>`
+(G-SEATS, `plans/shell-ux-rearchitecture/drafts/seats-schema.md` in the workspace meta-repo).
+It points at one session, a Chi run or an agent terminal, and keeps its name, scratchpad and
+address when that session ends. Needs a shell with bridge API 5; an older shell gets a clear
+"needs a newer Ikenga shell" error.
+
+```bash
+# What's seated in the active project (or --project <id>): status, session,
+# who holds it since when, and engine caveats.
+iyke seat ls
+#   seat:royalti-co/lead             live    claude-code      terminal 9f2c… (agent live)
+#       held by orchestrator since 2026-09-27 14:03Z
+#   seat:royalti-co/nightly          run     openrouter       run 41d0…
+#       not resumable after restart
+
+# Create a seat: empty, around an open session, or around a past one.
+iyke seat create docs --engine claude-code
+iyke seat create docs --session <terminal-or-run-id>
+iyke seat create docs --engine claude-code --resume <run-id>
+
+# Send to a seat — its own addressing mode, not an alias of --label. The text
+# goes to whatever the seat holds: typed into its terminal (with Enter), queued
+# behind a busy run, or sent to an idle run. A vacant seat resumes its last
+# session first, or starts a fresh one when it can't resume — and says which.
+iyke terminal-send --seat docs "update the README for v0.6"
+
+# Resume a vacant seat with a first turn (never falls back to a fresh session;
+# a seat that can't resume answers not_resumable), or move a session in.
+iyke seat resume docs --prompt "pick up where you left off"
+iyke seat resume docs --session <terminal-or-run-id>
+
+# Fill with a new session, clear (the scratchpad stays), release a hold.
+iyke seat fill docs --prompt "draft the changelog"
+iyke seat clear docs
+iyke seat release docs
+```
+
+A `<seat>` is `<name>` (in the shell's active project), `@<name>`, `<project>/<name>` or
+`seat:<project>/<name>`. A `<ref>` is a terminal id or a Chi run id; seating a terminal whose
+engine the shell can't read off its command line needs `--engine`.
+
+**Holds and takeover.** `--as <client>` names the caller (default `iyke` — this CLI has no
+agent identity of its own); `--hold` holds the seat for that client (10 minutes, renewed by
+each held call); another client is then refused with "held by X since T; --takeover to claim
+it". `--takeover` is the only way past a hold, and the displaced client is told once, on its
+next call. A hold is a courtesy between clients, not a security boundary. The three flags work
+on every `seat` verb and on `terminal-send --seat`.
+
+Rename and remove are app-only for now, and `seat resume` without `--prompt` or `--session`
+answers `needs_prompt` (an interactive start needs the Ikenga window).
+
 ## Testing
 
 `cargo test` covers argument parsing only — it proves clap accepts the flags,

@@ -8,6 +8,29 @@ use serde_json::Value;
 
 use crate::control::ControlFile;
 
+/// A non-2xx answer from the bridge. Its `Display` is the historical
+/// `"<path> returned HTTP <code>: <body>"` string (so `cmd::missing_route`'s
+/// text check still holds); callers that need the structured body — the
+/// seat routes' `{code, message, details?}` (WP-70) — downcast to it.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub path: String,
+    pub status: u16,
+    pub body: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} returned HTTP {}: {}",
+            self.path, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
 pub struct Client {
     base: String,
     token: String,
@@ -90,7 +113,11 @@ fn normalize_response(resp: Result<ureq::Response, ureq::Error>, path: &str) -> 
         }
         Err(ureq::Error::Status(code, r)) => {
             let body = r.into_string().unwrap_or_default();
-            Err(anyhow!("{path} returned HTTP {code}: {body}"))
+            Err(anyhow::Error::new(HttpStatusError {
+                path: path.to_string(),
+                status: code,
+                body,
+            }))
         }
         Err(ureq::Error::Transport(t)) => {
             // WP-62 review (C5): a request timeout (a live FE round trip like
