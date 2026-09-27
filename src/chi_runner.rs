@@ -1,14 +1,19 @@
 //! chi-runner — pipe-preserving engine runner daemon (WP-09).
 //!
-//! Spawned by Ikenga inside a tmux session so the engine child survives
-//! an app restart. Reads its config from a JSON file at startup, runs the
-//! engine process with Stdio::piped() (not a PTY), and writes structured
-//! output to the chi-cache JSON output file.
+//! Spawned detached by the Ikenga shell (via its SessionExecutor) so the
+//! engine child survives an app restart. Reads its config from a JSON file at
+//! startup, runs the engine process with Stdio::piped() (not a PTY), and
+//! writes structured output to the chi-cache JSON status file.
 //!
-//! Invocation (by Tauri via tmux):
-//!   tmux new-session -d -s <run_id> -e IKENGA_CHI_CONF=<path> chi-runner
+//! Invocation (by the shell, detached — no terminal multiplexer, no PTY):
+//!   IKENGA_CHI_CONF=<path> chi-runner
 //!
 //! The config file path is read from IKENGA_CHI_CONF.
+//!
+//! Status file: every update is written atomically (sibling temp file +
+//! rename), so readers — the shell's `GET /iyke/chi/status` and
+//! `iyke chi attach` — never observe a partially-written JSON document.
+//! Status vocabulary written here: `running`, `done`, `failed`, `timed_out`.
 //! Exit codes:
 //!   0 = done (success)
 //!   1 = done (failed / error from engine)
@@ -17,8 +22,8 @@
 use std::{
     env,
     fs,
-    io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    io::{self, BufRead, BufReader, Write},
+    path::{Path, PathBuf},
     process::{self, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -54,8 +59,27 @@ struct OutputFile {
 
 fn write_output(path: &str, f: &OutputFile) {
     if let Ok(json) = serde_json::to_string(f) {
-        let _ = fs::write(path, json);
+        let _ = write_atomic(Path::new(path), json.as_bytes());
     }
+}
+
+/// Write `bytes` to `target` atomically: write a sibling temp file in the same
+/// directory (`<target>.tmp.<pid>`), then `rename` it over the target. On
+/// POSIX `rename(2)` within one filesystem is atomic; on Windows
+/// `std::fs::rename` uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which
+/// replaces an existing target. Readers therefore see either the previous
+/// complete document or the new one, never a torn write. The temp file is
+/// removed if any step fails.
+fn write_atomic(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tmp_name = target.as_os_str().to_owned();
+    tmp_name.push(format!(".tmp.{}", process::id()));
+    let tmp = PathBuf::from(tmp_name);
+
+    let result = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, target));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn now_iso() -> String {
@@ -439,4 +463,109 @@ fn main() {
 
     let code = run(conf);
     process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("chi-runner-test-{name}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn tmp_siblings(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect()
+    }
+
+    #[test]
+    fn write_atomic_replaces_target_and_removes_temp() {
+        let dir = scratch_dir("replace");
+        let target = dir.join("run.json");
+        write_atomic(&target, b"{\"a\":1}").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"a\":1}");
+        write_atomic(&target, b"{\"a\":2}").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"a\":2}");
+        assert!(tmp_siblings(&dir).is_empty(), "temp file left behind");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_atomic_cleans_up_temp_on_rename_failure() {
+        let dir = scratch_dir("fail");
+        // A non-empty directory at the target path makes rename fail on every
+        // platform, after the temp file has already been written.
+        let target = dir.join("run.json");
+        fs::create_dir_all(target.join("occupied")).unwrap();
+        assert!(write_atomic(&target, b"{}").is_err());
+        assert!(
+            tmp_siblings(&dir).is_empty(),
+            "temp file left behind on error"
+        );
+        assert!(target.is_dir(), "target must be untouched on error");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_output_never_exposes_a_partial_document() {
+        let dir = scratch_dir("torn");
+        let target = dir.join("run.json");
+        let path = target.to_string_lossy().into_owned();
+
+        // Large, growing payloads make a torn non-atomic write overwhelmingly
+        // likely to be observed by the concurrent reader.
+        let mut state = OutputFile {
+            status: Some("running".into()),
+            ..Default::default()
+        };
+        write_output(&path, &state);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let stop = Arc::clone(&stop);
+            let target = target.clone();
+            std::thread::spawn(move || {
+                let mut reads = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    let s = fs::read_to_string(&target).expect("target must always exist");
+                    let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|e| {
+                        panic!("observed partial document ({e}): {} bytes", s.len())
+                    });
+                    assert!(v.get("status").is_some());
+                    reads += 1;
+                }
+                reads
+            })
+        };
+
+        let mut output = String::new();
+        for i in 0..150 {
+            output.push_str(&"x".repeat(4096));
+            output.push_str(&i.to_string());
+            state.output = Some(output.clone());
+            write_output(&path, &state);
+        }
+        state.status = Some("done".into());
+        write_output(&path, &state);
+
+        stop.store(true, Ordering::Relaxed);
+        let reads = reader.join().expect("reader observed a partial document");
+        assert!(reads > 0);
+        assert!(tmp_siblings(&dir).is_empty(), "temp file left behind");
+        let final_v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(final_v["status"], "done");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
