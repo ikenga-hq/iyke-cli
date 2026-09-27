@@ -10,6 +10,7 @@
 //! tabs, split/focus/close panes.
 
 mod api;
+mod chi_attach;
 mod cmd;
 mod control;
 mod output;
@@ -939,8 +940,8 @@ enum ChiAction {
         /// Timeout in seconds. Currently reserved.
         #[arg(long)]
         timeout: Option<u32>,
-        /// Launch via tmux so the session survives an Ikenga app restart.
-        /// Use `iyke chi attach <run_id>` to reconnect later.
+        /// Launch chi-runner detached so the run survives an Ikenga app restart.
+        /// Use `iyke chi attach <run_id>` to follow its output later.
         #[arg(long, default_value_t = false)]
         persistent: bool,
     },
@@ -970,9 +971,15 @@ enum ChiAction {
         /// Run id.
         run_id: String,
     },
-    /// Attach (or re-attach) to the tmux session backing a persistent chi run.
-    /// The chi run must have been started with --persistent (or via Ikenga with
-    /// tmux persistence enabled). Spawns `tmux attach-session -t <run_id>`.
+    /// Follow a chi run's output until it finishes (Ctrl-C stops following; it
+    /// does NOT cancel the run).
+    ///
+    /// Polls the shell's run status (`GET /iyke/chi/status`) every ~500 ms and
+    /// prints only output appended since the last poll (reprinting in full if
+    /// the output was reset). Exits 0 when the run is `done`; prints the error
+    /// to stderr and exits 1 when it ends `failed`, `cancelled` or `timed_out`.
+    /// Ctrl-C only stops this follower — the detached chi-runner keeps going;
+    /// use `iyke chi cancel <run_id>` to stop the run itself.
     Attach {
         /// Run id returned by `iyke chi run`.
         run_id: String,
@@ -2471,47 +2478,16 @@ fn run_chi(client: &Client, action: ChiAction, fmt: Format) -> Result<()> {
             output::print_chi_result(&v, fmt);
         }
         ChiAction::Attach { run_id } => {
-            // Check that the run has a terminal_session_id (i.e. was started
-            // with tmux persistence). If the field is absent or null we bail
-            // early with a clear message rather than spawning a shell.
-            let status = client.get_with_query("/iyke/chi/status", &[("runId", run_id.clone())])?;
-            let ts_id = status
-                .get("terminal_session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let session = ts_id.unwrap_or_else(|| run_id.clone());
-
-            // Verify the tmux session exists before attaching.
-            let check = std::process::Command::new("tmux")
-                .args(["has-session", "-t", &session])
-                .status();
-            match check {
-                Ok(s) if s.success() => {}
-                _ => {
-                    eprintln!("iyke chi attach: tmux session '{session}' not found.");
-                    eprintln!("The run may have already finished, or was not started with persistence.");
-                    std::process::exit(1);
-                }
-            }
-
-            // Replace this process with tmux attach.
-            #[cfg(unix)]
-            {
-                use std::ffi::CString;
-                let tmux = CString::new("tmux").unwrap();
-                let attach = CString::new("attach-session").unwrap();
-                let flag_t = CString::new("-t").unwrap();
-                let sess = CString::new(session.as_str()).unwrap();
-                let args = [tmux.as_ptr(), attach.as_ptr(), flag_t.as_ptr(), sess.as_ptr(), std::ptr::null()];
-                unsafe { libc::execvp(tmux.as_ptr(), args.as_ptr()); }
-                eprintln!("iyke chi attach: execvp tmux failed");
-                std::process::exit(1);
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = std::process::Command::new("tmux")
-                    .args(["attach-session", "-t", &session])
-                    .status();
+            // chi-runner runs detached (no terminal session); follow its status file via
+            // the shell's status endpoint until the run is terminal.
+            let code = chi_attach::follow(
+                || client.get_with_query("/iyke/chi/status", &[("runId", run_id.clone())]),
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+                chi_attach::POLL_INTERVAL,
+            )?;
+            if code != 0 {
+                std::process::exit(code);
             }
         }
     }
