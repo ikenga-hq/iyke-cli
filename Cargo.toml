@@ -1,6 +1,6 @@
 [package]
 name = "iyke-cli"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "CLI for the Ikenga desktop app's Iyke localhost control bridge"
