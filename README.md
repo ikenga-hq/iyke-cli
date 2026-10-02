@@ -1,6 +1,6 @@
 # iyke
 
-[![Version](https://img.shields.io/badge/version-v0.0.0-blue.svg)](https://github.com/ikenga-hq/iyke-cli/releases)
+[![Version](https://img.shields.io/badge/version-v0.6.0-blue.svg)](https://github.com/ikenga-hq/iyke-cli/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 > `iyke` — the runtime controller for a running Ikenga shell. Drive panes, modes, tabs, and
