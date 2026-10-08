@@ -134,15 +134,25 @@ fn doy_to_md(doy: u64, leap: bool) -> (u64, u64) {
 
 // ── Engine runner ─────────────────────────────────────────────────────────────
 
+/// The daemon's Chi mode id -> claude's `--permission-mode`. Must match the
+/// daemon's in-process mapping (`acp_mode.rs` `as_claude_flag`): the daemon's
+/// `auto` is claude's `acceptEdits`. Claude also has its own, broader `auto`
+/// mode, so passing `auto` through unchanged gave detached runs a wider mode
+/// than the daemon (and its audit) recorded. Unknown ids fail closed to
+/// `default`.
+fn claude_permission_mode(mode: Option<&str>) -> &'static str {
+    match mode.unwrap_or("default") {
+        "bypassPermissions" => "bypassPermissions",
+        "auto" | "acceptEdits" => "acceptEdits",
+        "plan" => "plan",
+        _ => "default",
+    }
+}
+
 fn build_command(conf: &RunnerConf) -> Result<Command, String> {
     match conf.engine_id.as_str() {
         "claude-code" => {
-            let perm_mode = match conf.mode.as_deref().unwrap_or("default") {
-                "bypassPermissions" => "bypassPermissions",
-                "auto" => "auto",
-                "plan" => "plan",
-                _ => "default",
-            };
+            let perm_mode = claude_permission_mode(conf.mode.as_deref());
             let mut cmd = Command::new("claude");
             cmd.arg("--permission-prompt-tool")
                 .arg("stdio")
@@ -487,6 +497,42 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains(".tmp."))
             .collect()
+    }
+
+    #[test]
+    fn daemon_auto_maps_to_claude_accept_edits_not_claude_auto() {
+        assert_eq!(claude_permission_mode(Some("auto")), "acceptEdits");
+        assert_eq!(claude_permission_mode(Some("acceptEdits")), "acceptEdits");
+        assert_eq!(claude_permission_mode(Some("plan")), "plan");
+        assert_eq!(
+            claude_permission_mode(Some("bypassPermissions")),
+            "bypassPermissions"
+        );
+        assert_eq!(claude_permission_mode(None), "default");
+        assert_eq!(claude_permission_mode(Some("Auto")), "default");
+        assert_eq!(claude_permission_mode(Some("manual")), "default");
+    }
+
+    #[test]
+    fn build_command_passes_accept_edits_for_daemon_auto() {
+        let conf = RunnerConf {
+            run_id: "r".into(),
+            engine_id: "claude-code".into(),
+            prompt: "p".into(),
+            cwd: ".".into(),
+            model: None,
+            mode: Some("auto".into()),
+            resume_session_id: None,
+            output_path: "o".into(),
+            timeout_seconds: None,
+        };
+        let cmd = build_command(&conf).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let i = args.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(args[i + 1], "acceptEdits");
     }
 
     #[test]
