@@ -170,6 +170,38 @@ an action reachable only by key or `iyke actions set`. The six `{{name}}` run va
 (`file.path`, `file.name`, `selection`, `project.root`, `pane.url`, `branch`) interpolate as
 `""` when there's no matching context.
 
+## Projects
+
+```bash
+# What's registered (add --all to include archived ones).
+iyke project list
+
+# Register a directory as a project. id defaults to a slug of the directory
+# name, name to the directory name; override with --id / --name / --color /
+# --description.
+iyke project create ~/projects/my-repo
+#   created
+#   id:      my-repo
+#   name:    my-repo
+#   root:    /home/you/projects/my-repo
+
+# Idempotent by root path: running it again returns the project that already
+# has that root ("already registered") instead of failing, so an agent can
+# retry safely.
+iyke project create ~/projects/my-repo
+#   already registered
+
+iyke project switch my-repo      # make it the active project
+```
+
+An open shell shows a new project in its Projects list right away (the shell
+re-reads the list on `projects:list-changed`); no reload. `create` needs the
+shell's Settings capability (the `full` tier); without it the command fails
+naming that capability. **Agents: register projects with `iyke project create`
+(or the `iyke_project_create` MCP tool), never by writing `ikenga.db`
+directly.** That bypasses validation and the access layer, and a running shell
+will not notice the row.
+
 ## Chi seats
 
 A **seat** is a named, per-project slot for an agent session — `seat:<project>/<name>`

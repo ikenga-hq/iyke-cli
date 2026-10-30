@@ -502,7 +502,8 @@ enum Command {
     },
 
     /// The Project noun (WP-21b): show and switch the shell's active
-    /// project, and list the Explorer sidebar's registered sections.
+    /// project, list and register projects (`list`, `create <path>`), and
+    /// list the Explorer sidebar's registered sections.
     Project {
         #[command(subcommand)]
         action: cmd::project::ProjectAction,
